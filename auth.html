@@ -390,6 +390,8 @@ import { initializeApp } from 'https://www.gstatic.com/firebasejs/13.3.0/firebas
 import {
   getAuth,
   GoogleAuthProvider,
+  setPersistence,
+  browserLocalPersistence,
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
@@ -425,10 +427,13 @@ const db = getDatabase(app);
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
+setPersistence(auth, browserLocalPersistence).catch(() => {});
+
 const $ = id => document.getElementById(id);
 let mode = 'signin';
 let busy = false;
 let authFlowInProgress = false;
+let redirecting = false;
 
 if (location.protocol === 'file:') {
   $('authSplash').classList.add('hidden');
@@ -512,8 +517,23 @@ async function saveUserProfileToRTDB(user, extras = {}) {
   });
 }
 
+async function safeSyncAndRedirect(user, extras = {}) {
+  if (!user || redirecting) return;
+  redirecting = true;
+  try {
+    await Promise.race([
+      saveUserProfileToRTDB(user, extras),
+      new Promise(resolve => setTimeout(resolve, 2500))
+    ]);
+  } catch (e) {
+    console.warn('RTDB profile sync skipped before redirect:', e);
+  }
+  goHome();
+}
+
 function goHome() {
-  window.location.replace('index.html');
+  const target = new URL('index.html', window.location.href).href;
+  window.location.replace(target);
 }
 
 $('tabSignIn').addEventListener('click', () => setMode('signin'));
@@ -530,14 +550,13 @@ $('togglePw').addEventListener('click', () => {
 });
 
 $('googleBtn').addEventListener('click', async () => {
-  if (busy) return;
+  if (busy || redirecting) return;
   showAlert('');
   authFlowInProgress = true;
   setBusy(true, 'Connecting…');
   try {
     const res = await signInWithPopup(auth, googleProvider);
-    await saveUserProfileToRTDB(res.user);
-    goHome();
+    await safeSyncAndRedirect(res.user);
   } catch (err) {
     if (err?.code === 'auth/popup-blocked' || err?.code === 'auth/operation-not-supported-in-this-environment') {
       try {
@@ -556,7 +575,7 @@ $('googleBtn').addEventListener('click', async () => {
 
 $('authForm').addEventListener('submit', async e => {
   e.preventDefault();
-  if (busy) return;
+  if (busy || redirecting) return;
   showAlert('');
 
   const email = $('emailInput').value.trim();
@@ -585,16 +604,19 @@ $('authForm').addEventListener('submit', async e => {
   try {
     if (mode === 'signup') {
       const cred = await createUserWithEmailAndPassword(auth, email, password);
-      await updateProfile(cred.user, { displayName: fullName });
-      await saveUserProfileToRTDB(cred.user, { displayName: fullName, company });
+      try { await updateProfile(cred.user, { displayName: fullName }); } catch (e) {}
+      await safeSyncAndRedirect(cred.user, { displayName: fullName, company });
     } else {
       const cred = await signInWithEmailAndPassword(auth, email, password);
-      await saveUserProfileToRTDB(cred.user);
+      await safeSyncAndRedirect(cred.user);
     }
-    goHome();
   } catch (err) {
     authFlowInProgress = false;
     setBusy(false);
+    if (err?.code === 'auth/email-already-in-use') {
+      setMode('signin');
+      $('passwordInput').focus();
+    }
     showAlert(friendlyError(err), 'error');
   }
 });
@@ -614,16 +636,22 @@ $('forgotBtn').addEventListener('click', async () => {
   }
 });
 
-getRedirectResult(auth).catch(err => {
-  $('authSplash').classList.add('hidden');
-  showAlert(friendlyError(err), 'error');
-});
+getRedirectResult(auth)
+  .then(async res => {
+    if (res?.user) {
+      authFlowInProgress = true;
+      await safeSyncAndRedirect(res.user);
+    }
+  })
+  .catch(err => {
+    $('authSplash').classList.add('hidden');
+    showAlert(friendlyError(err), 'error');
+  });
 
 onAuthStateChanged(auth, async user => {
-  if (authFlowInProgress) return;
+  if (authFlowInProgress || redirecting) return;
   if (user) {
-    try { await saveUserProfileToRTDB(user); } catch (e) {}
-    goHome();
+    await safeSyncAndRedirect(user);
   } else {
     $('authSplash').classList.add('hidden');
   }
