@@ -104,44 +104,12 @@ button:focus-visible,input:focus-visible{outline:2px solid var(--mint);outline-o
 
 .visual-center{margin:auto 0;padding:28px 0}
 .visual-center h1{
-  margin:0 0 18px;
+  margin:0;
   font-size:clamp(30px,3vw,38px);
   letter-spacing:-1.3px;line-height:1.12;
 }
 .visual-center h1 span{color:var(--mint)}
-.wave-card{
-  display:none;
-  padding:20px;border-radius:18px;
-  background:rgba(12,20,36,.72);
-  border:1px solid rgba(90,115,155,.32);
-  flex-direction:column;gap:16px;
-}
-.wave-top{display:flex;align-items:center;gap:12px}
-.wave-avatar{
-  width:42px;height:42px;border-radius:50%;
-  display:grid;place-items:center;
-  background:linear-gradient(135deg,#5dcbb2,#4d6cf5);
-  color:#081620;font-weight:800;font-size:16px;
-}
-.wave-meta strong{display:block;font-size:14px}
-.wave-meta span{display:block;font-size:11.5px;color:var(--mint);margin-top:2px}
-.bars{height:36px;display:flex;align-items:center;justify-content:space-between;gap:4px}
-.bars i{
-  display:block;flex:1;height:10px;border-radius:4px;
-  background:linear-gradient(180deg,#a6ffea,#57c7a9);
-  animation:pulse 1.3s ease-in-out infinite alternate;
-}
-.bars i:nth-child(2n){height:22px;animation-delay:.2s}
-.bars i:nth-child(3n){height:30px;animation-delay:.4s}
-.bars i:nth-child(5n){height:16px;animation-delay:.15s}
-@keyframes pulse{from{transform:scaleY(.45);opacity:.55}to{transform:scaleY(1);opacity:1}}
-
-.chips{display:none;flex-wrap:wrap;gap:8px}
-.chip{
-  padding:6px 11px;border-radius:999px;
-  background:rgba(24,38,62,.85);border:1px solid rgba(76,102,140,.42);
-  color:#c5d6ec;font-size:11.5px;font-weight:600;
-}
+.wave-card,.chips{display:none!important}
 
 .panel-form{
   padding:38px 36px;
@@ -428,8 +396,6 @@ const db = getDatabase(app);
 const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-setPersistence(auth, browserLocalPersistence).catch(() => {});
-
 const $ = id => document.getElementById(id);
 let mode = 'signin';
 let busy = false;
@@ -518,23 +484,28 @@ async function saveUserProfileToRTDB(user, extras = {}) {
   });
 }
 
-async function safeSyncAndRedirect(user, extras = {}) {
+function goHome() {
+  const target = new URL('index.html', window.location.href).href;
+  try {
+    window.location.replace(target);
+  } catch (e) {
+    window.location.href = target;
+  }
+}
+
+async function safeSyncAndRedirect(user, extras = {}, timeoutMs = 1500) {
   if (!user || redirecting) return;
   redirecting = true;
+  $('submitLabel').textContent = 'Redirecting…';
   try {
     await Promise.race([
       saveUserProfileToRTDB(user, extras),
-      new Promise(resolve => setTimeout(resolve, 2500))
+      new Promise(resolve => setTimeout(resolve, timeoutMs))
     ]);
   } catch (e) {
     console.warn('RTDB profile sync skipped before redirect:', e);
   }
   goHome();
-}
-
-function goHome() {
-  const target = new URL('index.html', window.location.href).href;
-  window.location.replace(target);
 }
 
 $('tabSignIn').addEventListener('click', () => setMode('signin'));
@@ -637,24 +608,31 @@ $('forgotBtn').addEventListener('click', async () => {
   }
 });
 
-getRedirectResult(auth)
-  .then(async res => {
+(async () => {
+  try { await setPersistence(auth, browserLocalPersistence); } catch (e) {}
+  try {
+    const res = await getRedirectResult(auth);
     if (res?.user) {
       authFlowInProgress = true;
       await safeSyncAndRedirect(res.user);
+      return;
     }
-  })
-  .catch(err => {
+  } catch (err) {
     $('authSplash').classList.add('hidden');
     showAlert(friendlyError(err), 'error');
-  });
+  }
+  try { await auth.authStateReady(); } catch (e) {}
+  if (auth.currentUser && !authFlowInProgress && !redirecting) {
+    await safeSyncAndRedirect(auth.currentUser, {}, 600);
+    return;
+  }
+  $('authSplash').classList.add('hidden');
+})();
 
 onAuthStateChanged(auth, async user => {
   if (authFlowInProgress || redirecting) return;
   if (user) {
-    await safeSyncAndRedirect(user);
-  } else {
-    $('authSplash').classList.add('hidden');
+    await safeSyncAndRedirect(user, {}, 600);
   }
 });
 </script>
